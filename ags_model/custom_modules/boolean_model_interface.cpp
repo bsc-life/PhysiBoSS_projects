@@ -5,12 +5,53 @@ using namespace PhysiCell;
 
 Submodel_Information bm_interface_info;
 
+
+
+void pre_update_intracellular_ags(Cell* pCell, Phenotype& phenotype, double dt)
+{
+    if( phenotype.death.dead == true )
+	{
+		pCell->functions.update_phenotype = NULL;
+		return;
+	}
+    // Update MaBoSS input nodes based on the environment and cell state
+    update_boolean_model_inputs(pCell, phenotype, dt);
+    
+    return;
+}
+
+
+void post_update_intracellular_ags(Cell* pCell, Phenotype& phenotype, double dt)
+{
+    if( phenotype.death.dead == true )
+	{
+		pCell->functions.update_phenotype = NULL;
+		return;
+	}
+    
+    // update the cell fate based on the boolean outputs
+    update_cell_from_boolean_model(pCell, phenotype, dt);
+
+    // Get track of some boolean node values for debugging
+    // @oth: Probably not needed anymore with pcdl
+    update_monitor_variables(pCell);
+
+    return;
+}
+
+
+
+
+
 // Auxiliar functions
 std::string get_drug_target(std::string drug_name){
     std::string param_name = drug_name + "_target";
     std::string drug_target = parameters.strings(param_name);
     return drug_target;
 }
+
+
+
 
 void boolean_model_interface_setup()
 {
@@ -43,7 +84,10 @@ void boolean_model_interface_setup()
     // Could add here output of transfer functions
 	bm_interface_info.register_model();
 }
-// @oth: This is not really needed, except for the setup function above
+
+
+
+// @oth: This is not really needed, only used for the setup function above
 void ags_bm_interface_main (Cell* pCell, Phenotype& phenotype, double dt){
     
 	if( phenotype.death.dead == true )
@@ -54,7 +98,7 @@ void ags_bm_interface_main (Cell* pCell, Phenotype& phenotype, double dt){
 }
 
 
-// @othmane: New PhysiBoSS, this might not be even needed, can be tracked through the BM states CSV in the output folder
+// @oth: New PhysiBoSS, this might not be even needed, can be tracked through the BM states CSV in the output folder
 void update_monitor_variables(Cell* pCell ) 
 {
 	static int mek_node_ix = pCell->custom_data.find_variable_index("mek_node");
@@ -99,6 +143,15 @@ void update_monitor_variables(Cell* pCell )
 // Functions used to update the Boolean model just before running MaBoSS
 
 double calculate_drug_effect(Cell* pCell, std::string drug_name){
+
+    /*
+
+    This function calculates the effect of a drug on a specific node in the Boolean model.
+
+    The input is the drug internalized concentration, the output is the Probability of turning OFF a specific node
+    This Hill function is shaped XML parameters for the Hill index and the half-max
+
+    */
     
 	std::string p_half_max_name   = drug_name + "_half_max";
     std::string p_hill_coeff_name = drug_name + "_Hill_coeff";
@@ -119,42 +172,14 @@ double calculate_drug_effect(Cell* pCell, std::string drug_name){
     return Hill_response_function(ic_drug_conc, p_half_max, p_hill_coeff);
 }
 
-
-// NOT EMPLOYED
-double calculate_drug_effect_double_sigmoid(Cell* pCell, std::string drug_name){
-    
-	std::string p_half_max_name   = drug_name + "_half_max";
-    std::string p_hill_coeff_name = drug_name + "_Hill_coeff";
-    static int drug_idx         = microenvironment.find_density_index( drug_name );
-    static int p_half_max_idx   = pCell->custom_data.find_variable_index(p_half_max_name);
-    static int p_hill_coeff_idx = pCell->custom_data.find_variable_index(p_hill_coeff_name);
-
-    double p_half_max    = pCell->custom_data[p_half_max_idx];
-    double p_hill_coeff  = pCell->custom_data[p_hill_coeff_idx]; // For now, use same H index for both sigmoidal
-    
-    // We assume the previous variable is the experimental IC50
-    double p_half_max25 = p_half_max / 2;
-    double p_half_max75 = p_half_max * 1.25;
-	
-    double cell_volume   = pCell->phenotype.volume.total;
-    double ic_drug_total = pCell->phenotype.molecular.internalized_total_substrates[drug_idx];
-    double ic_drug_conc  = ic_drug_total / cell_volume; // Convert to concentration
-
-
-
-    // std::cout << pCell->custom_data[p_half_max_idx] << std::endl;
-    double first_hill = Hill_response_function(ic_drug_conc, p_half_max25, p_hill_coeff) - 0.5;
-    double second_hill = Hill_response_function(ic_drug_conc, p_half_max75, p_hill_coeff) + 0.5;
-
-    double final_sigmoidal = first_hill + second_hill;
-
-    return final_sigmoidal;
-}
-
-
 // @oth: Instead of this, we could have the input rules
 void update_boolean_model_inputs( Cell* pCell, Phenotype& phenotype, double dt )
 {
+    /*
+    This function updates the Boolean model inputs based on the drug concentrations.a
+    After the drug effect is calculated, a Gillespie process is used to update the Boolean model.
+    */
+
     if( pCell->phenotype.death.dead == true )
 	{ return; }
 
@@ -183,50 +208,20 @@ void update_boolean_model_inputs( Cell* pCell, Phenotype& phenotype, double dt )
     return;
 }
 
-void pathway_reactivation( Cell* pCell, Phenotype& phenotype, double dt ){
-
-    static int reactivation_prob_idx = pCell->custom_data.find_variable_index("reactivation_value");
-    double p_reactivation = pCell->custom_data.variables[reactivation_prob_idx].value;
-    
-    int n_drugs = 2;
-    std::string drugs[n_drugs] = { "drug_X", "drug_Y" };
-    for (int i = 0; i < n_drugs; i++){
-        std::string drug_name = drugs[i];
-        std::string target_node = get_drug_target(drug_name);
-        if (target_node == "none" )
-            continue;
-        if ( uniform_random() < p_reactivation )
-            pCell->phenotype.intracellular->set_boolean_variable_value(target_node, 1);
-    }
-    return;
-}
-
-void pre_update_intracellular_ags(Cell* pCell, Phenotype& phenotype, double dt)
-{
-    if( phenotype.death.dead == true )
-	{
-		pCell->functions.update_phenotype = NULL;
-		return;
-	}
-    // Update MaBoSS input nodes based on the environment and cell state
-    update_boolean_model_inputs(pCell, phenotype, dt);
-
-    // This function can be use for the reactivation mechanisms
-    // pathway_reactivation( Cell* pCell, Phenotype& phenotype, double dt )
-    
-    return;
-}
 
 
 // @oth: added these functions to compute the readout nodes from the BM
 double get_boolean_antisurvival_outputs(Cell* pCell, Phenotype& phenotype){
 
+    /*
+    This function computes the output of the apoptosis pathway in the Boolean model.
+    It does a convex combination of the three output nodes.
+    */
+
     // Antisurvival node outputs
-    // bool casp37 = pCell->phenotype.intracellular->get_boolean_variable_value( "Caspase37" );
     bool FOXO = pCell->phenotype.intracellular->get_boolean_variable_value( "FOXO" );
     bool casp8 = pCell->phenotype.intracellular->get_boolean_variable_value( "Caspase8" );
     bool casp9 = pCell->phenotype.intracellular->get_boolean_variable_value( "Caspase9" );
-
     double anti_w1 = get_custom_data_variable(pCell, "w1_apoptosis");
     double anti_w2 = get_custom_data_variable(pCell, "w2_apoptosis");
     double anti_w3 = get_custom_data_variable(pCell, "w3_apoptosis");
@@ -234,9 +229,7 @@ double get_boolean_antisurvival_outputs(Cell* pCell, Phenotype& phenotype){
     double anti_w1_scaled = anti_w1 / total_anti;
     double anti_w2_scaled = anti_w2 / total_anti;
     double anti_w3_scaled = anti_w3 / total_anti;
-
     double S_anti_real = (anti_w1_scaled*casp8) + (anti_w2_scaled * casp9) + (anti_w3_scaled * FOXO);
-
 
     // For the Control case 
     if (total_anti == 0.0){
@@ -247,6 +240,11 @@ double get_boolean_antisurvival_outputs(Cell* pCell, Phenotype& phenotype){
 }
 
 double get_boolean_prosurvival_outputs(Cell* pCell, Phenotype& phenotype){
+
+    /*
+    This function computes the output of the prosurvival pathway in the Boolean model.
+    It does a convex combination of the three output nodes.
+    */
 
     // bool CCND1 = pCell->phenotype.intracellular->get_boolean_variable_value( "CCND1" );
     bool cMYC = pCell->phenotype.intracellular->get_boolean_variable_value( "cMYC" );
@@ -263,12 +261,6 @@ double get_boolean_prosurvival_outputs(Cell* pCell, Phenotype& phenotype){
 
     double S_pro_real = (pro_w1_scaled * cMYC) + (pro_w2_scaled * TCF) + (pro_w3_scaled * RSK);
 
-
-    // std::cout << "pro_w1: " << pro_w1 << " and pro_w2: " << pro_w2 << " and pro_w3: " << pro_w3 << std::endl;
-    // std::cout << "total_pro: " << total_pro << std::endl;
-    // std::cout << "pro_w1_scaled: " << pro_w1_scaled << " and pro_w2_scaled: " << pro_w2_scaled << " and pro_w3_scaled: " << pro_w3_scaled << std::endl;
-    // std::cout << "cMYC: " << cMYC << " and TCF: " << TCF << " and RSK: " << RSK << std::endl;
-
     // For the Control curve, when all weights are 0, the output should be 1.0 (maximum growth rate)
     // This avoids the -nan value as an input for the Hill function
     if (total_pro == 0.0){
@@ -279,13 +271,14 @@ double get_boolean_prosurvival_outputs(Cell* pCell, Phenotype& phenotype){
 }
 
 
-// Super simple arrest function for now, but could use other arguments
-bool prosurvival_arrest_function( Cell* pCell, Phenotype& phenotype, double dt){
-    return true;
-}
-
-
 void update_cell_from_boolean_model(Cell* pCell, Phenotype& phenotype, double dt){
+
+    /*
+    This function updates the cell variables based on the Boolean model outputs.
+    Maps the value of the convex combination of the output nodes to the cell variables.
+    Prosurvival and Antisurvival are mapped to the growth rate and apoptosis rate respectively.
+
+    */
 
     if( pCell->phenotype.death.dead == true )
 	{ return; }
@@ -309,46 +302,14 @@ void update_cell_from_boolean_model(Cell* pCell, Phenotype& phenotype, double dt
     double hill_coeff_growth = get_custom_data_variable(pCell, "hill_coeff_growth");
     double K_half_growth = get_custom_data_variable(pCell, "K_half_growth");
     double S_pro_real = get_boolean_prosurvival_outputs(pCell, phenotype);
-
     // sigmoidal mapping
     double growth_value_Hill =  (Hill_response_function(S_pro_real, K_half_growth, hill_coeff_growth));
     growth_value_Hill *= basal_growth_rate; // Max value is the basal growth rate
-
-    // for debugging
-    // static double last_check_time = 0.0;
-    // if (PhysiCell_globals.current_time > last_check_time + 40.0) {
-    //     std::cout << "S_pro_real: " << S_pro_real << " and growth_value_Hill: " << growth_value_Hill <<  " for cell " << pCell->ID << std::endl;
-    //     last_check_time = PhysiCell_globals.current_time;
-    // }
-
-
     double growth_value_Hill_arrested = Hill_response_function(S_pro_real, K_half_growth, hill_coeff_growth); // Max is 1, min is 0
-
-    // Map it to an arrest function as a probability
-    // if (uniform_random() < growth_value_Hill_arrested){
-    //     pCell->phenotype.cycle.data.phase_link(0,0).arrest_function = prosurvival_arrest_function;
-    // }
-
     // Old approach: Just map directly the value of the Hill function to the growth rate
     pCell->phenotype.cycle.data.transition_rate(0, 0) = growth_value_Hill;
 
     return;
 }
 
-void post_update_intracellular_ags(Cell* pCell, Phenotype& phenotype, double dt)
-{
-    if( phenotype.death.dead == true )
-	{
-		pCell->functions.update_phenotype = NULL;
-		return;
-	}
-    
-    // update the cell fate based on the boolean outputs
-    update_cell_from_boolean_model(pCell, phenotype, dt);
-    
-    // Get track of some boolean node values for debugging
-    // @oth: Probably not needed anymore with pcdl
-    update_monitor_variables(pCell);
 
-    return;
-}
